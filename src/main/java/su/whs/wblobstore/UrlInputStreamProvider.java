@@ -11,7 +11,7 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 
-import su.whs.jstreamcache.ICacheAccessor;
+import su.whs.streamcache.StreamCache;
 
 /**
  * Created by igor n. boulliev on 01.01.16.
@@ -21,7 +21,7 @@ import su.whs.jstreamcache.ICacheAccessor;
  * Provide ICacheAccessor implementation for http resources, with caching support
  */
 
-public class UrlInputStreamProvider implements ICacheAccessor {
+public class UrlInputStreamProvider implements StreamCache.StreamsProvider {
     private static final String TAG="UrlStream";
     private String mUrl;
     private BlobStore mBlobStore;
@@ -29,10 +29,17 @@ public class UrlInputStreamProvider implements ICacheAccessor {
     private int mReadTimeout = 1000;
     private String mMimeType;
     private long mLength;
+    private String mReferer = null;
+    private String mUserAgent = null;
 
     public UrlInputStreamProvider(BlobStore bs, String url) {
         mUrl = url;
         mBlobStore = bs;
+    }
+
+    public UrlInputStreamProvider(BlobStore bs, String url, String referer) {
+        this(bs,url);
+        mReferer = referer;
     }
 
     @Override
@@ -60,17 +67,25 @@ public class UrlInputStreamProvider implements ICacheAccessor {
         }
         conn.setConnectTimeout(mConnectionTimeout);
         conn.setReadTimeout(mReadTimeout);
-        try {
-            conn.connect();
-        } catch (IOException e) {
-            if (BuildConfig.DEBUG) {
-                Log.e(TAG, String.format("fetch i/o error '%s'->'%s'",mUrl,e));
-            }
 
-            return null;
-        }
         if (conn instanceof HttpURLConnection) {
             HttpURLConnection http = (HttpURLConnection)conn;
+
+
+            if (mReferer!=null) {
+                http.setRequestProperty("Referer",mReferer);
+            }
+
+            try {
+                conn.connect();
+            } catch (IOException e) {
+                if (BuildConfig.DEBUG) {
+                    Log.e(TAG, String.format("fetch i/o error '%s'->'%s'",mUrl,e));
+                }
+
+                return null;
+            }
+
             mMimeType = http.getContentType();
             mLength = http.getContentLength();
             try {
@@ -89,6 +104,16 @@ public class UrlInputStreamProvider implements ICacheAccessor {
                 if (BuildConfig.DEBUG) {
                     Log.e(TAG, String.format("attach property error '%s'->'%s'",mUrl,e));
                 }
+            }
+        } else {
+            try {
+                conn.connect();
+            } catch (IOException e) {
+                if (BuildConfig.DEBUG) {
+                    Log.e(TAG, String.format("fetch i/o error '%s'->'%s'",mUrl,e));
+                }
+
+                return null;
             }
         }
         try {

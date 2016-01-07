@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.text.TextUtils;
+import android.util.Log;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -28,6 +29,7 @@ public class BlobStore {
             try {
                 return k.Get();
             } catch (FileNotFoundException e) {
+
             }
         }
         return null;
@@ -36,6 +38,13 @@ public class BlobStore {
     public Key getKey(String url) {
         return new Key(url);
     }
+
+    public void removeKey(String url) {
+        Key k = new Key(url);
+        if (k.Load())
+            k.Delete();
+    }
+
 
     public OutputStream openCacheStream(String url) throws IOException {
         Key k = new Key(url);
@@ -60,6 +69,14 @@ public class BlobStore {
             }
         }
         return null;
+    }
+
+    public String getDatabasesPath() {
+        return mDataBaseDir.getAbsolutePath();
+    }
+
+    public SQLiteDatabase getDatabase() {
+        return mDatabaseHelper.getReadableDatabase();
     }
 
     public enum LOCATION {
@@ -122,7 +139,13 @@ public class BlobStore {
 
         switch (mLocation) {
             case EXTERNAL:
-
+                initExternalLocation(context);
+                break;
+            case INTERNAL:
+                initInternalLocation(context);
+                break;
+            default:
+                initExternalLocation(context);
         }
 
     }
@@ -212,7 +235,7 @@ public class BlobStore {
         return new DatabaseHelper(mDataBaseDir.getAbsolutePath(),"blobstore", null, DB_VERSION) {
             @Override
             protected void onCreate(SQLiteDatabase db) {
-                db.execSQL("create table pairs(_id integer primary key, parent integer, keyhash integer, keyname text, value text, flags integer(1), modified integer");
+                db.execSQL("create table pairs(_id integer primary key, parent integer default 0, keyhash integer, keyname text, value text, flags integer(1), modified integer)");
                 db.execSQL("create index pairs_idx on pairs(parent,keyhash)");
             }
 
@@ -239,6 +262,9 @@ public class BlobStore {
         private Key[] mChilds = null;
 
         public Key(String name) {
+            if (name==null) {
+                Log.e("BS:KEY", "name are null");
+            }
             mName = name;
             mId = -1;
         }
@@ -406,10 +432,10 @@ public class BlobStore {
                     if (mParent.mId<0) mParent.Commit();
                     cv.put("parent",mParent.mId);
                 }
-                mId = db.insert("pairs",null,cv);
-            } else {
                 cv.put("keyname",mName);
                 cv.put("keyhash",mName.hashCode());
+                mId = db.insert("pairs",null,cv);
+            } else {
                 db.update("pairs",cv,"_id=?",new String[] { String.valueOf(mId)});
             }
             return mId;
@@ -418,6 +444,7 @@ public class BlobStore {
 
         public Key Child(String name) {
             Key[] childs = Childs();
+            if (childs!=null)
             for (Key k : childs) {
                 if (name.equals(k.mName)) {
                     return k;
@@ -467,6 +494,6 @@ public class BlobStore {
         File out = new File(mCacheStoreDir,name);
         if (out.createNewFile())
             return new FileOutputStream(out);
-        throw new IOException();
+        throw new IOException(); // file exists
     }
 }
