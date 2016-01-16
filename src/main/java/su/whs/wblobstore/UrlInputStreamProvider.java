@@ -3,13 +3,23 @@ package su.whs.wblobstore;
 import android.support.v4.BuildConfig;
 import android.util.Log;
 
+import org.apache.http.Header;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.entity.BufferedHttpEntity;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.params.BasicHttpParams;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
+import org.jetbrains.annotations.NotNull;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLConnection;
+import java.net.SocketTimeoutException;
 
 import su.whs.streamcache.StreamCache;
 
@@ -25,103 +35,59 @@ public class UrlInputStreamProvider implements StreamCache.StreamsProvider {
     private static final String TAG="UrlStream";
     private String mUrl;
     private BlobStore mBlobStore;
-    private int mConnectionTimeout = 3000;
-    private int mReadTimeout = 1000;
+    private int mConnectionTimeout = 15000;
+    private int mReadTimeout = 10000;
     private String mMimeType;
     private long mLength;
     private String mReferer = null;
     private String mUserAgent = null;
 
-    public UrlInputStreamProvider(BlobStore bs, String url) {
+    public UrlInputStreamProvider(@NotNull BlobStore bs, @NotNull String url) {
         mUrl = url;
         mBlobStore = bs;
     }
 
-    public UrlInputStreamProvider(BlobStore bs, String url, String referer) {
+    public UrlInputStreamProvider(@NotNull BlobStore bs, @NotNull String url, @NotNull String referer) {
         this(bs,url);
         mReferer = referer;
     }
 
     @Override
     public InputStream getSourceInputStream() {
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, String.format("fetch '%s'",mUrl));
-        }
-        URL url = null;
+        HttpParams httpParameters = new BasicHttpParams();
+        HttpConnectionParams.setConnectionTimeout(httpParameters, getConnectionTimeout());
+        HttpConnectionParams.setSoTimeout(httpParameters, getConnectionTimeout());
+        HttpClient client = new DefaultHttpClient(httpParameters);
+
+        HttpGet request = new HttpGet(mUrl);
+        if (mReferer!=null)
+            request.addHeader("Referer",mReferer);
+        HttpResponse response;
         try {
-            url = new URL(mUrl);
-        } catch (MalformedURLException e) {
-            if (BuildConfig.DEBUG) {
-                Log.e(TAG, String.format("mailformed url '%s'",mUrl));
+            response = client.execute(request);
+            HttpEntity entity = response.getEntity();
+            Header mime = response.getFirstHeader("Content-Type");
+            if (mime!=null) {
+                String[] val = mime.getValue().split(";");// [0].trim();
+                if (val!=null && val.length>0) {
+                    String mimeType = val[0].trim();
+                    mBlobStore.attachProperty(mUrl,"Content-Type",mimeType);
+                }
+
             }
-            return null;
-        }
-        URLConnection conn = null;
-        try {
-            conn = url.openConnection();
+            BufferedHttpEntity bufferedEntity = new BufferedHttpEntity(entity);
+            InputStream inputStream = bufferedEntity.getContent();
+            return inputStream;
+        } catch (ClientProtocolException e) {
+            Log.e(TAG, "error read http stream:" + e);
+            e.printStackTrace();
+            onReadError();
+        } catch (SocketTimeoutException e) {
+            onConnectionError();
         } catch (IOException e) {
-            if (BuildConfig.DEBUG) {
-                Log.e(TAG, String.format("connection error '%s'->'%s'",mUrl,e));
-            }
-            return null;
-        }
-        conn.setConnectTimeout(mConnectionTimeout);
-        conn.setReadTimeout(mReadTimeout);
-
-        if (conn instanceof HttpURLConnection) {
-            HttpURLConnection http = (HttpURLConnection)conn;
-
-
-            if (mReferer!=null) {
-                http.setRequestProperty("Referer",mReferer);
-            }
-
-            try {
-                conn.connect();
-            } catch (IOException e) {
-                if (BuildConfig.DEBUG) {
-                    Log.e(TAG, String.format("fetch i/o error '%s'->'%s'",mUrl,e));
-                }
-
-                return null;
-            }
-
-            mMimeType = http.getContentType();
-            mLength = http.getContentLength();
-            try {
-                mBlobStore.attachProperty(mUrl,"Content-Length",String.valueOf(mLength));
-            } catch (IOException e) {
-                // could not store content-length
-                if (BuildConfig.DEBUG) {
-                    Log.e(TAG, String.format("attach property error '%s'->'%s'",mUrl,e));
-                }
-
-            }
-            try {
-                mBlobStore.attachProperty(mUrl,"Content-Type",mMimeType);
-            } catch (IOException e) {
-                // could not store content-type
-                if (BuildConfig.DEBUG) {
-                    Log.e(TAG, String.format("attach property error '%s'->'%s'",mUrl,e));
-                }
-            }
-        } else {
-            try {
-                conn.connect();
-            } catch (IOException e) {
-                if (BuildConfig.DEBUG) {
-                    Log.e(TAG, String.format("fetch i/o error '%s'->'%s'",mUrl,e));
-                }
-
-                return null;
-            }
-        }
-        try {
-            return conn.getInputStream();
-        } catch (IOException e) {
-            if (BuildConfig.DEBUG) {
-                Log.e(TAG, String.format("fetch open InputStream error '%s'->'%s'",mUrl,e));
-            }
+            Log.e(TAG,"error read http stream:"+e);
+            e.printStackTrace();
+            onReadError();
         }
         return null;
     }
@@ -130,9 +96,7 @@ public class UrlInputStreamProvider implements StreamCache.StreamsProvider {
     public InputStream getCacheInputStream() {
         InputStream is = mBlobStore.getCachedStream(mUrl);
         if (is!=null) {
-            if (BuildConfig.DEBUG) {
-                Log.d(TAG, String.format("get cached stream for '%s'",mUrl));
-            }
+            Log.d(TAG, String.format("get cached stream for '%s'",mUrl));
             String l = mBlobStore.getAttachedProperty(mUrl,"Content-Length");
             String m = mBlobStore.getAttachedProperty(mUrl,"Content-Type");
             mMimeType = m;
@@ -162,4 +126,22 @@ public class UrlInputStreamProvider implements StreamCache.StreamsProvider {
 
     public String getMimeType() { return mMimeType; }
     public long getLength() { return mLength; }
+    protected int getConnectionTimeout() { return mConnectionTimeout; }
+    protected int getReadTimeout() { return mReadTimeout; }
+    protected void onConnectionError() {
+
+    }
+
+    protected String getUrl() { return mUrl; }
+    protected void onReadError() {
+
+    }
+
+    protected void onCacheCreateError() {
+
+    }
+
+    protected void onCacheReadError() {
+
+    }
 }

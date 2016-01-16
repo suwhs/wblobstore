@@ -9,6 +9,7 @@ import android.text.TextUtils;
 import android.util.Log;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -17,67 +18,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.WeakHashMap;
 
 /**
  * Created by igor n. boulliev on 31.12.15.
  */
 public class BlobStore {
-
-    public InputStream getCachedStream(String url) {
-        Key k = getKey(url);
-        if (k.Load()) {
-            try {
-                return k.Get();
-            } catch (FileNotFoundException e) {
-
-            }
-        }
-        return null;
-    }
-
-    public Key getKey(String url) {
-        return new Key(url);
-    }
-
-    public void removeKey(String url) {
-        Key k = new Key(url);
-        if (k.Load())
-            k.Delete();
-    }
-
-
-    public OutputStream openCacheStream(String url) throws IOException {
-        Key k = new Key(url);
-        if (k.Load()) return null;
-        return k.Put();
-    }
-
-    public void attachProperty(String url, String name, String value) throws IOException {
-        Key k = new Key(url);
-        if (k.Load()) {
-            k.Add(name,value);
-            k.Commit();
-        }
-    }
-
-    public String getAttachedProperty(String key, String name) {
-        Key k = new Key(key);
-        if (k.Load()) {
-            Key p = k.Child(name);
-            if (p!=null) {
-                return p.StringValue();
-            }
-        }
-        return null;
-    }
-
-    public String getDatabasesPath() {
-        return mDataBaseDir.getAbsolutePath();
-    }
-
-    public SQLiteDatabase getDatabase() {
-        return mDatabaseHelper.getReadableDatabase();
-    }
 
     public enum LOCATION {
         INTERNAL,
@@ -94,6 +41,7 @@ public class BlobStore {
     private boolean mFirstRun = false;
     private DatabaseHelper mDatabaseHelper;
     private File mDataBaseDir;
+    private WeakHashMap<String,Key> mKeysCache = new WeakHashMap<String,Key>();
 
     public BlobStore(Context context, LOCATION location, String path) {
         mContext = context;
@@ -228,6 +176,77 @@ public class BlobStore {
 
     public Context getContext() { return mContext; }
 
+
+    public InputStream getCachedStream(String url) {
+        Key k = getKey(url);
+        if (k.Load()) {
+            try {
+                return k.Get();
+            } catch (FileNotFoundException e) {
+
+            }
+        }
+        return null;
+    }
+
+    public synchronized Key getKey(String url) {
+        if (mKeysCache.containsKey(url)) {
+            return mKeysCache.get(url);
+        }
+        Key result = new Key(url);
+        mKeysCache.put(url,result);
+        return result;
+    }
+
+    public synchronized void removeKey(String url) {
+        Key k;
+        if (mKeysCache.containsKey(url)) {
+            k = mKeysCache.remove(url);
+        } else {
+            k = new Key(url);
+        }
+        if (k.mName==null) {
+            Log.e("BS","key name are null!");
+        }
+        if (k.Load())
+            k.Delete();
+    }
+
+
+    public OutputStream openCacheStream(String url) throws IOException {
+        Key k = getKey(url);
+        if (!k.Load()) k.Commit();
+        return k.Put();
+    }
+
+    public void attachProperty(String url, String name, String value) throws IOException {
+        Key k = getKey(url);
+        if (k.Load()) {
+            k.Add(name,value);
+            k.Commit();
+        }
+    }
+
+    public String getAttachedProperty(String url, String name) {
+        Key k = getKey(url);
+        if (k.Load()) {
+            Key p = k.Child(name);
+            if (p!=null) {
+                return p.StringValue();
+            }
+        }
+        return null;
+    }
+
+    public String getDatabasesPath() {
+        return mDataBaseDir.getAbsolutePath();
+    }
+
+    public SQLiteDatabase getDatabase() {
+        return mDatabaseHelper.getReadableDatabase();
+    }
+
+
     /* BlobStoreDatabase */
     private static int DB_VERSION = 1;
 
@@ -249,24 +268,30 @@ public class BlobStore {
 
 
     public class Key {
-        static final int VALUE_FILE = 0;
-        static final int VALUE_DATA = 1;
-        static final int VALUE_EMPTY = 2;
-        static final int VALUE_PERSISTENT = 4;
+        static final int VALUE_FILE = 1;
+        static final int VALUE_DATA = 2;
+        static final int VALUE_EMPTY = 4;
+        static final int VALUE_PERSISTENT = 8;
         private long mId = -1;
         private Key mParent;
         private String mName;
-        private int mFlags = 2;
+        private int mFlags = VALUE_EMPTY;
         private String mValue;
         private int mModified;
-        private Key[] mChilds = null;
+        // private Key[] mChilds = null;
+        private HashMap<String,Key> mChilds = null; // new HashMap<String,Key>();
 
-        public Key(String name) {
+        private Key(String name) {
             if (name==null) {
                 Log.e("BS:KEY", "name are null");
             }
             mName = name;
             mId = -1;
+        }
+
+        public Key(Key key, String name, int flags) {
+            this(key,name);
+            mFlags = flags;
         }
 
         public boolean Load() {
@@ -283,12 +308,12 @@ public class BlobStore {
             return true;
         }
 
-        public Key(Key parent, String name) {
+        private Key(Key parent, String name) {
             this(name);
             mParent = parent;
         }
 
-        public Key(Cursor cursor) {
+        private Key(Cursor cursor) {
             fromCursor(cursor);
         }
 
@@ -314,22 +339,24 @@ public class BlobStore {
 
         public void Delete() {
             if (mId<0) return;
-            Key[] childs = Childs();
-            if (childs!=null) for(Key c : childs) c.Delete();
-            if ((mFlags & VALUE_FILE)>0) {
+            if (mChilds!=null) {
+                for(Key c : mChilds.values()) c.Delete();
+            }
+            if ((mFlags & VALUE_FILE)==VALUE_FILE) {
                 if ((mFlags & VALUE_PERSISTENT)>0) {
                     delete_file(String.format("%s.dat",mId));
                 } else {
                     delete_cache(String.format("%s.dat",mId));
                 }
             }
-            if (mParent!=null) mParent.invalidateChild();
             SQLiteDatabase db = mDatabaseHelper.getWritableDatabase();
             db.delete("pairs", "_id=?", new String[]{String.valueOf(mId)});
         }
 
 
         public void Put(InputStream stream, int flags) throws IOException {
+            if (mId<0) throw new IllegalStateException();
+            if ((flags & VALUE_FILE) == 0) throw new IllegalStateException();
             OutputStream out;
             if ((flags & VALUE_PERSISTENT)>0) {
                 out = get_file_output_stream(String.format("%s.dat",mId));
@@ -337,7 +364,6 @@ public class BlobStore {
                 out = get_cache_output_stream(String.format("%s.dat",mId));
             }
             byte[] buffer = new byte[65535];
-
             for(int read = stream.read(buffer);read>-1; read = stream.read(buffer)) {
                 out.write(buffer,0,read);
             }
@@ -345,17 +371,27 @@ public class BlobStore {
         }
 
         public void Put(InputStream stream) throws IOException {
-            if ((mFlags & VALUE_FILE)==0) {
-                mFlags = VALUE_FILE | (mFlags & VALUE_PERSISTENT);
-                Commit();
-            }
-            Put(stream, VALUE_FILE);
+            if (mId<0) throw new IllegalStateException();
+            Put(stream, mFlags);
         }
 
         public OutputStream Put() throws IOException {
-            if ((mFlags & VALUE_FILE)==0) {
-                mFlags = VALUE_FILE | (mFlags & VALUE_PERSISTENT);
-                Commit();
+            if (mId<0) throw new IllegalStateException();
+            if ((mFlags & VALUE_DATA)==VALUE_DATA) {
+                // mFlags = VALUE_DATA | (mFlags & VALUE_PERSISTENT);
+                return new OutputStream() {
+                    private ByteArrayOutputStream os = new ByteArrayOutputStream();
+                    @Override
+                    public void write(int oneByte) throws IOException {
+                        os.write(oneByte);
+                    }
+
+                    @Override
+                    public void close() {
+                        mValue = new String(os.toByteArray());
+                    }
+                };
+
             }
             if ((mFlags & VALUE_PERSISTENT)>0) {
                 return get_file_output_stream(String.format("%s.dat",mId));
@@ -364,15 +400,12 @@ public class BlobStore {
         }
 
         public void Put(String data) {
+            if ((mFlags & VALUE_DATA)==0) throw new IllegalStateException();
             mValue = data;
-            if ((mFlags&VALUE_EMPTY)>0) {
-                mFlags = VALUE_DATA | (mFlags & VALUE_PERSISTENT);
-            }
-            Commit();
         }
 
         public InputStream Get() throws FileNotFoundException {
-            if ((mFlags&VALUE_DATA)>0) {
+            if ((mFlags&VALUE_DATA)==VALUE_DATA) {
                 return new ByteArrayInputStream(mValue.getBytes());
             }
             if ((mFlags&VALUE_PERSISTENT)>0) {
@@ -390,29 +423,46 @@ public class BlobStore {
             if (mId<0) {
                 mId = Commit();
             }
-            Key result = new Key(this,name);
+            Key result = new Key(this,name,flags);
+            result.Load();
+            synchronized (this) {
+                if (mChilds==null) mChilds = new HashMap<String,Key>();
+                mChilds.put(name,result);
+            }
             result.Put(value);
             return result;
         }
 
         public Key Add(String name, String data) throws IOException {
-            return Add(name, new ByteArrayInputStream(data.getBytes()), VALUE_DATA);
+            if (mId<0) {
+                mId = Commit();
+            }
+            Key result = new Key(this,name,VALUE_DATA);
+            result.Load();
+            synchronized (this) {
+                if (mChilds == null) mChilds = new HashMap<String,Key>();
+                mChilds.put(name,result);
+            }
+            result.Put(data);
+            return result;
         }
 
-        public Key[] Childs() {
+        public HashMap<String,Key> Childs() {
             synchronized (this) {
                 if (mChilds!=null) return mChilds;
             }
+            mChilds = new HashMap<String,Key>();
             SQLiteDatabase db = mDatabaseHelper.getReadableDatabase();
 
-            Cursor c = db.query("pairs", new String[]{"keyname", "value", "flags", "modified"}, "parent=?",
+            Cursor c = db.query("pairs", new String[]{"_id","keyname", "value", "flags", "modified"}, "parent=?",
                     new String[]{String.valueOf(mId)}, null, null, null);
             if (c.moveToFirst()) {
-                Key[] result = new Key[c.getCount()];
-                for(int i=0; i<c.getCount(); i++) {
-                    result[i] = new Key(this,c);
-                }
-                return result;
+                // Key[] result = new Key[c.getCount()];
+                do{
+                    Key cc = new Key(this,c);
+                    mChilds.put(cc.GetName(),cc);
+                } while(c.moveToNext());
+                return mChilds;
             }
             return null;
         }
@@ -427,6 +477,9 @@ public class BlobStore {
             ContentValues cv = new ContentValues();
             cv.put("modified",(new Date()).getTime());
             cv.put("flags", mFlags);
+            if ((mFlags & VALUE_DATA)>0) {
+                cv.put("value",mValue);
+            }
             if (mId<0) {
                 if (mParent!=null) {
                     if (mParent.mId<0) mParent.Commit();
@@ -443,13 +496,10 @@ public class BlobStore {
 
 
         public Key Child(String name) {
-            Key[] childs = Childs();
-            if (childs!=null)
-            for (Key k : childs) {
-                if (name.equals(k.mName)) {
-                    return k;
-                }
+            if (mChilds==null) {
+                mChilds = Childs();
             }
+            if (mChilds!=null&&mChilds.containsKey(name)) return mChilds.get(name);
             return null;
         }
 
@@ -459,6 +509,14 @@ public class BlobStore {
 
         public String GetName() {
             return mName;
+        }
+
+        public boolean Contains(String name) {
+            return mChilds!=null && mChilds.containsKey(name);
+        }
+
+        public boolean Exists() {
+            return Load();
         }
     }
 
